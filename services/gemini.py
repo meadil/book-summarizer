@@ -63,7 +63,7 @@ BOOK TEXT:
 MAX_CHARS = 3_000_000  # ~750k tokens, leaves headroom under the 1M token context window
 
 
-def summarize(text: str, model: str = "gemini-2.5-flash") -> str:
+def summarize(text: str, model: str = "gemini-3.5-flash") -> str:
     if len(text) > MAX_CHARS:
         raise ValueError(
             f"Book is too long to summarize in one call ({len(text)} chars, max {MAX_CHARS}). "
