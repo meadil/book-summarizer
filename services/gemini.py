@@ -63,7 +63,14 @@ BOOK TEXT:
 MAX_CHARS = 3_000_000  # ~750k tokens, leaves headroom under the 1M token context window
 
 
-def summarize(text: str, model: str = "gemini-3.5-flash") -> str:
+def summarize_stream(text: str, model: str = "gemini-3.5-flash"):
+    """
+    Async generator: yields text chunks as Gemini generates them, instead of
+    blocking until the whole summary is done. This keeps the server responsive
+    to other requests during a long generation, and keeps the HTTP connection
+    actively sending data so intermediary proxies (like Render's) don't time
+    it out waiting in silence.
+    """
     if len(text) > MAX_CHARS:
         raise ValueError(
             f"Book is too long to summarize in one call ({len(text)} chars, max {MAX_CHARS}). "
@@ -72,13 +79,17 @@ def summarize(text: str, model: str = "gemini-3.5-flash") -> str:
 
     client = _get_client()
 
-    response = client.models.generate_content(
-        model=model,
-        contents=USER_PROMPT_TEMPLATE.format(text=text),
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.3,
-        ),
-    )
+    async def _stream():
+        response_stream = await client.aio.models.generate_content_stream(
+            model=model,
+            contents=USER_PROMPT_TEMPLATE.format(text=text),
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                temperature=0.3,
+            ),
+        )
+        async for chunk in response_stream:
+            if chunk.text:
+                yield chunk.text
 
-    return response.text
+    return _stream()

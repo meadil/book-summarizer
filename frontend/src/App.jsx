@@ -32,19 +32,55 @@ export default function App() {
     if (!file) return;
     setStatus("loading");
     setError(null);
+    setResult(null);
 
     const form = new FormData();
     form.append("file", file);
 
     try {
       const res = await fetch("/summarize", { method: "POST", body: form });
-      const data = await res.json();
 
       if (!res.ok) {
-        throw new Error(data.detail || "Something went wrong.");
+        // Pre-stream validation errors (bad file, too long, etc.) still
+        // come back as plain JSON with a normal HTTP error status.
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `Request failed (${res.status})`);
       }
 
-      setResult(data);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let summary = "";
+
+      const handleLine = (line) => {
+        if (!line.trim()) return;
+        const event = JSON.parse(line);
+
+        if (event.type === "meta") {
+          setResult({ filename: event.filename, char_count: event.char_count, summary: "" });
+          setStatus("streaming");
+        } else if (event.type === "chunk") {
+          summary += event.text;
+          const snapshot = summary;
+          setResult((prev) => (prev ? { ...prev, summary: snapshot } : prev));
+        } else if (event.type === "error") {
+          throw new Error(event.detail);
+        }
+        // "done" needs no handling — the loop ending is enough.
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop(); // last entry may be an incomplete line — keep it buffered
+
+        for (const line of lines) handleLine(line);
+      }
+      if (buffer.trim()) handleLine(buffer);
+
       setStatus("done");
     } catch (err) {
       setError(err.message);
@@ -91,20 +127,20 @@ export default function App() {
 
       <button
         className="extract-btn"
-        disabled={!file || status === "loading"}
+        disabled={!file || status === "loading" || status === "streaming"}
         onClick={handleExtract}
       >
-        {status === "loading" ? "Reading…" : "Extract the ideas"}
+        {status === "loading" || status === "streaming" ? "Reading…" : "Extract the ideas"}
       </button>
 
-      {status === "error" && (
+      {error && (
         <div className="error-box">
           <span className="error-box__label">Couldn't finish that one.</span>
           <span>{error}</span>
         </div>
       )}
 
-      {status === "done" && result && (
+      {result && (
         <section className="result">
           <div className="catalog-bar">
             <span className="catalog-bar__title">{result.filename}</span>
@@ -114,7 +150,7 @@ export default function App() {
           </div>
 
           <div className="page-sheet">
-            <span className="stamp">extracted</span>
+            {status === "done" && <span className="stamp">extracted</span>}
             <div className="prose">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>
                 {result.summary}

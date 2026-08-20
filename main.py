@@ -1,9 +1,12 @@
+import json
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from config import settings
 from services.extract import extract_text
-from services.gemini import summarize
+from services.gemini import summarize_stream, MAX_CHARS
 
 app = FastAPI(title="Book Summarizer")
 
@@ -18,7 +21,7 @@ async def extract(file: UploadFile = File(...)):
     file_bytes = await file.read()
 
     try:
-        text = extract_text(file.filename, file_bytes)
+        text = await run_in_threadpool(extract_text, file.filename, file_bytes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -35,27 +38,35 @@ async def extract(file: UploadFile = File(...)):
 @app.post("/summarize")
 async def summarize_book(file: UploadFile = File(...)):
     file_bytes = await file.read()
+    filename = file.filename
 
     try:
-        text = extract_text(file.filename, file_bytes)
+        text = await run_in_threadpool(extract_text, filename, file_bytes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     if not text.strip():
         raise HTTPException(status_code=422, detail="No text could be extracted from this file.")
 
-    try:
-        summary = summarize(text)
-    except ValueError as e:
-        raise HTTPException(status_code=413, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {e}")
+    if len(text) > MAX_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Book is too long to summarize in one call ({len(text)} chars, max {MAX_CHARS}).",
+        )
 
-    return {
-        "filename": file.filename,
-        "char_count": len(text),
-        "summary": summary,
-    }
+    async def event_stream():
+        # Sent first so the frontend can show filename/char_count immediately.
+        yield json.dumps({"type": "meta", "filename": filename, "char_count": len(text)}) + "\n"
+        try:
+            async for piece in summarize_stream(text):
+                yield json.dumps({"type": "chunk", "text": piece}) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+        except Exception as e:
+            # Headers are already sent by this point, so errors mid-stream
+            # have to be signaled in-band rather than as an HTTP status code.
+            yield json.dumps({"type": "error", "detail": f"Gemini API error: {e}"}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 # Serve the built React frontend. Must be mounted last so it doesn't
