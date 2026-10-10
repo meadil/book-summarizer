@@ -120,5 +120,3 @@ render.yaml        Render deployment config
 ---
 
 Status: working. Upload, summarise, read.
-
-Built because "should I read this?" shouldn't cost an hour.
